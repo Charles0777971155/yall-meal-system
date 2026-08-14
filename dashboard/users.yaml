@@ -1,0 +1,37 @@
+users:
+  charles:
+    name: Charles Karbedeh Jr.
+    title: MEAL Officer & Climate Justice Hub Coordinator
+    role: admin
+    project: all
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+  women_coord:
+    name: Women's Rights Coordinator
+    title: Project Coordinator (placeholder — rename me in Manage)
+    role: coordinator
+    project: uaf_women
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+  agro_coord:
+    name: Agroecology Coordinator
+    title: Project Coordinator (placeholder — rename me in Manage)
+    role: coordinator
+    project: agroecology
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+  legal_coord:
+    name: Legal Empowerment Coordinator
+    title: Project Coordinator (placeholder — rename me in Manage)
+    role: coordinator
+    project: legal_empowerment
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+  women_agri_coord:
+    name: Women Agricultural Resilience Coordinator
+    title: Project Coordinator (placeholder — rename me in Manage)
+    role: coordinator
+    project: women_agri
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+  ed_viewer:
+    name: Edwin Boakai
+    title: Executive Director (view only — placeholder, rename me in Manage)
+    role: viewer
+    project: all
+    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
