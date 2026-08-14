@@ -300,8 +300,9 @@ def render_dashboard(user, df):
         alt.Chart(chart_df)
         .mark_bar()
         .encode(
-            x=alt.X("Indicators:Q", title="Number of indicators"),
-            y=alt.Y("Project:N", title=None, sort=[p["short_name"] for p in vp]),
+            x=alt.X("Project:N", title=None, sort=[p["short_name"] for p in vp],
+                     axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y("Indicators:Q", title="Number of indicators"),
             color=alt.Color(
                 "Status:N",
                 scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
@@ -310,7 +311,7 @@ def render_dashboard(user, df):
             order=alt.Order("Status:N", sort="descending"),
             tooltip=["Project", "Status", "Indicators"],
         )
-        .properties(height=max(120, 45 * len(vp)))
+        .properties(height=320)
     )
     st.altair_chart(status_chart, use_container_width=True)
 
@@ -451,37 +452,53 @@ def render_project(user, df, project_id):
     st.markdown(f"> {p['objective']}")
 
     st.subheader("Indicators")
-    inds = indicators_for(project_id)
+    all_inds = indicators_for(project_id)
 
-    chart_rows = []
-    for ind in inds:
-        pct = max(0, min(100, pct_complete(ind, df)))
-        label, _ = status_of(pct_complete(ind, df))
-        short_name = ind["name"] if len(ind["name"]) <= 55 else ind["name"][:52] + "..."
-        chart_rows.append({"Indicator": short_name, "% complete": round(pct, 1), "Status": label})
-    chart_df = pd.DataFrame(chart_rows)
-    ind_chart = (
-        alt.Chart(chart_df)
-        .mark_bar()
-        .encode(
-            x=alt.X("% complete:Q", scale=alt.Scale(domain=[0, 100])),
-            y=alt.Y("Indicator:N", title=None, sort=chart_df["Indicator"].tolist()),
-            color=alt.Color(
-                "Status:N",
-                scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
-                legend=alt.Legend(title=None, orient="top"),
-            ),
-            tooltip=["Indicator", "% complete", "Status"],
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        search = st.text_input("Search indicators", placeholder="e.g. 'training' or 'women'", key=f"search_{project_id}")
+    with c2:
+        status_filter = st.multiselect("Filter by status", ["On track", "At risk", "Behind"],
+                                        default=["On track", "At risk", "Behind"], key=f"statusf_{project_id}")
+
+    inds = all_inds
+    if search:
+        inds = [i for i in inds if search.lower() in i["name"].lower()]
+    inds = [i for i in inds if status_of(pct_complete(i, df))[0] in status_filter]
+
+    if not inds:
+        st.info("No indicators match your search/filter.")
+    else:
+        chart_rows = []
+        for ind in inds:
+            pct = max(0, min(100, pct_complete(ind, df)))
+            label, _ = status_of(pct_complete(ind, df))
+            short_name = ind["name"] if len(ind["name"]) <= 28 else ind["name"][:25] + "..."
+            chart_rows.append({"Indicator": short_name, "Full name": ind["name"], "% complete": round(pct, 1), "Status": label})
+        chart_df = pd.DataFrame(chart_rows)
+        ind_chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Indicator:N", title=None, sort=chart_df["Indicator"].tolist(),
+                         axis=alt.Axis(labelAngle=-45, labelLimit=160)),
+                y=alt.Y("% complete:Q", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color(
+                    "Status:N",
+                    scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
+                    legend=alt.Legend(title=None, orient="top"),
+                ),
+                tooltip=["Full name", "% complete", "Status"],
+            )
+            .properties(height=380)
         )
-        .properties(height=max(200, 26 * len(inds)))
-    )
-    st.altair_chart(ind_chart, use_container_width=True)
+        st.altair_chart(ind_chart, use_container_width=True)
 
-    for ind in inds:
-        render_indicator_row(ind, df, can_edit)
+        for ind in inds:
+            render_indicator_row(ind, df, can_edit)
 
     if st.session_state.get("logging_indicator"):
-        ind = next((i for i in inds if i["id"] == st.session_state["logging_indicator"]), None)
+        ind = next((i for i in all_inds if i["id"] == st.session_state["logging_indicator"]), None)
         if ind:
             render_log_form(ind, project_id, user)
 
@@ -578,6 +595,11 @@ def render_manage(user):
                 if st.button("Save name", key=f"apply_name_{uid}") and new_name:
                     auth.rename_user(uid, new_name)
                     st.success(f"Renamed to {new_name}.")
+                    st.rerun()
+                new_title = st.text_input("Edit title", key=f"title_{uid}", placeholder="e.g. Project Coordinator")
+                if st.button("Save title", key=f"apply_title_{uid}") and new_title:
+                    auth.set_title(uid, new_title)
+                    st.success(f"Title updated to {new_title}.")
                     st.rerun()
             with c2:
                 new_pin = st.text_input("Reset PIN", key=f"pin_{uid}", type="password", placeholder="new PIN")

@@ -59,3 +59,11 @@ def rename_user(username: str, new_name: str):
         raise KeyError(f"No such user: {username}")
     users[username]["name"] = new_name
     save_users(users)
+
+
+def set_title(username: str, new_title: str):
+    users = load_users()
+    if username not in users:
+        raise KeyError(f"No such user: {username}")
+    users[username]["title"] = new_title
+    save_users(users)
