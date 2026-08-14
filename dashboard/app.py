@@ -13,6 +13,7 @@ import sys
 import datetime
 
 import pandas as pd
+import altair as alt
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -287,6 +288,33 @@ def render_dashboard(user, df):
             c3.markdown(f"<span style='color:{STATUS_BAD};font-size:12px;'>&#9679; {s['bad']} behind</span>", unsafe_allow_html=True)
 
     st.markdown("---")
+    st.subheader("Progress at a glance")
+    chart_rows = []
+    for p in vp:
+        s = project_summary(p["id"], df)
+        chart_rows.append({"Project": p["short_name"], "Status": "On track", "Indicators": s["good"]})
+        chart_rows.append({"Project": p["short_name"], "Status": "At risk", "Indicators": s["warn"]})
+        chart_rows.append({"Project": p["short_name"], "Status": "Behind", "Indicators": s["bad"]})
+    chart_df = pd.DataFrame(chart_rows)
+    status_chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Indicators:Q", title="Number of indicators"),
+            y=alt.Y("Project:N", title=None, sort=[p["short_name"] for p in vp]),
+            color=alt.Color(
+                "Status:N",
+                scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            order=alt.Order("Status:N", sort="descending"),
+            tooltip=["Project", "Status", "Indicators"],
+        )
+        .properties(height=max(120, 45 * len(vp)))
+    )
+    st.altair_chart(status_chart, use_container_width=True)
+
+    st.markdown("---")
     st.subheader("Needs attention")
     st.caption(f"Indicators with no field data yet, or untouched for {STALE_DAYS}+ days.")
     project_ids = {p["id"] for p in vp}
@@ -424,6 +452,31 @@ def render_project(user, df, project_id):
 
     st.subheader("Indicators")
     inds = indicators_for(project_id)
+
+    chart_rows = []
+    for ind in inds:
+        pct = max(0, min(100, pct_complete(ind, df)))
+        label, _ = status_of(pct_complete(ind, df))
+        short_name = ind["name"] if len(ind["name"]) <= 55 else ind["name"][:52] + "..."
+        chart_rows.append({"Indicator": short_name, "% complete": round(pct, 1), "Status": label})
+    chart_df = pd.DataFrame(chart_rows)
+    ind_chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("% complete:Q", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("Indicator:N", title=None, sort=chart_df["Indicator"].tolist()),
+            color=alt.Color(
+                "Status:N",
+                scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=["Indicator", "% complete", "Status"],
+        )
+        .properties(height=max(200, 26 * len(inds)))
+    )
+    st.altair_chart(ind_chart, use_container_width=True)
+
     for ind in inds:
         render_indicator_row(ind, df, can_edit)
 
