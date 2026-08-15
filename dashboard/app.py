@@ -14,6 +14,8 @@ import datetime
 
 import pandas as pd
 import altair as alt
+import requests
+from fpdf import FPDF, FontFace
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -25,7 +27,8 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 LIVE_CSV = os.path.join(DATA_DIR, "submissions.csv")
 SAMPLE_CSV = os.path.join(DATA_DIR, "submissions_sample.csv")
 FIELDS = ["project", "indicator", "value", "assessed", "improved", "community", "group",
-          "obs_date", "note", "coordinator", "_submission_time"]
+          "obs_date", "lat", "lon", "photo_url",
+          "note", "coordinator", "_submission_time"]
 
 STALE_DAYS = 60  # flag an indicator as "needs attention" if untouched this long
 
@@ -356,6 +359,70 @@ def render_dashboard(user, df):
 # ---------------------------------------------------------------
 # PROJECT VIEW
 # ---------------------------------------------------------------
+def build_trend(df, indicator):
+    """Returns a DataFrame of (date, value) showing progress over time,
+    suitable for a line chart. The meaning of 'value' depends on type:
+    - count/milestone: running cumulative total as entries come in
+    - percent: running cumulative % (total improved / total assessed so far)
+    - average: raw readings over time (not split by cohort — a quick-glance
+      view; the indicator detail above already shows the per-cohort figure)
+    """
+    sub = _entries_for(df, indicator["id"])
+    if sub.empty:
+        return pd.DataFrame(columns=["Date", "Value"])
+
+    rows = []
+    if indicator["type"] == "percent":
+        running_a, running_i = 0.0, 0.0
+        for _, row in sub.iterrows():
+            a = _to_float(row.get("assessed"))
+            i = _to_float(row.get("improved"))
+            if a is None:
+                continue
+            running_a += a
+            running_i += (i or 0)
+            if running_a > 0:
+                rows.append({"Date": row["obs_date"], "Value": running_i / running_a * 100.0})
+    elif indicator["type"] == "average":
+        for _, row in sub.iterrows():
+            v = _to_float(row.get("value"))
+            if v is not None:
+                rows.append({"Date": row["obs_date"], "Value": v})
+    else:  # count / milestone
+        running = 0.0
+        for _, row in sub.iterrows():
+            v = _to_float(row.get("value"))
+            if v is None:
+                continue
+            running = max(running, v) if indicator["type"] == "milestone" else running + v
+            rows.append({"Date": row["obs_date"], "Value": running})
+
+    return pd.DataFrame(rows)
+
+
+def render_trend(df, indicator):
+    trend_df = build_trend(df, indicator)
+    if len(trend_df) < 2:
+        st.caption("Not enough entries yet to show a trend — need at least two logged dates.")
+        return
+    y_title = "%" if indicator["type"] in ("percent", "average") else indicator["unit"]
+    chart = (
+        alt.Chart(trend_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Value:Q", title=y_title),
+            tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Value:Q", format=".1f")],
+        )
+        .properties(height=180)
+    )
+    target_line = alt.Chart(pd.DataFrame({"y": [indicator["target"]]})).mark_rule(
+        color=STATUS_GOOD, strokeDash=[4, 4]
+    ).encode(y="y:Q")
+    st.altair_chart(chart + target_line, use_container_width=True)
+    st.caption("Dashed line = target.")
+
+
 def render_indicator_row(ind, df, can_edit):
     cur = current_value(df, ind)
     pct = pct_complete(ind, df)
@@ -389,6 +456,9 @@ def render_indicator_row(ind, df, can_edit):
         with c3:
             if can_edit and st.button("Log update", key=f"log_{ind['id']}"):
                 st.session_state["logging_indicator"] = ind["id"]
+
+        with st.expander("View trend over time"):
+            render_trend(df, ind)
 
 
 def render_log_form(ind, project_id, user):
@@ -440,72 +510,287 @@ def render_log_form(ind, project_id, user):
         st.rerun()
 
 
+def render_map_tab(df, project_id):
+    proj_ids = {i["id"] for i in indicators_for(project_id)}
+    sub = df[df["indicator"].isin(proj_ids)].copy()
+    sub["lat"] = pd.to_numeric(sub.get("lat"), errors="coerce")
+    sub["lon"] = pd.to_numeric(sub.get("lon"), errors="coerce")
+    sub = sub.dropna(subset=["lat", "lon"])
+    if sub.empty:
+        st.info("No GPS locations recorded yet for this project. GPS is captured automatically when a coordinator submits an entry through the Kobo mobile/web form with location turned on.")
+        return
+    st.caption(f"{len(sub)} entries with a recorded GPS location.")
+    st.map(sub[["lat", "lon"]], size=40)
+
+
+def render_photos_tab(df, project_id):
+    proj_ids = {i["id"] for i in indicators_for(project_id)}
+    sub = df[df["indicator"].isin(proj_ids)].copy()
+    sub = sub[sub["photo_url"].notna() & (sub["photo_url"].astype(str).str.strip() != "")]
+    if sub.empty:
+        st.info("No photos recorded yet for this project. Photos are captured when a coordinator attaches one through the Kobo mobile/web form.")
+        return
+
+    token = st.secrets.get("KOBO_TOKEN", None) if hasattr(st, "secrets") else None
+    if not token:
+        st.warning("Photos are stored in Kobo, but KOBO_TOKEN isn't set up in this app's secrets, so they can't be fetched and shown here. See Manage for the Kobo connection.")
+        return
+
+    sub["obs_date"] = pd.to_datetime(sub["obs_date"], errors="coerce")
+    sub = sub.sort_values("obs_date", ascending=False).head(12)
+    st.caption(f"Showing the {len(sub)} most recent photos.")
+    cols = st.columns(3)
+    for idx, (_, row) in enumerate(sub.iterrows()):
+        with cols[idx % 3]:
+            try:
+                resp = requests.get(row["photo_url"], headers={"Authorization": f"Token {token}"}, timeout=15)
+                resp.raise_for_status()
+                st.image(resp.content, use_container_width=True)
+            except Exception:
+                st.caption("(photo could not be loaded)")
+            ind = next((i for i in INDICATORS if i["id"] == row["indicator"]), None)
+            date_str = row["obs_date"].strftime("%d %b %Y") if pd.notnull(row["obs_date"]) else ""
+            st.caption(f"{date_str} · {row.get('community','')}")
+            st.caption(ind["name"][:60] if ind else row["indicator"])
+
+
 def render_project(user, df, project_id):
     p = project_by_id(project_id)
     if not p:
         st.error("Project not found.")
         return
-    can_edit = user["role"] == "admin" or (user["role"] == "coordinator" and user["project"] == project_id)
+    # Only the admin can log updates directly in the dashboard. Coordinators enter
+    # everything through Kobo, which has real, permanent storage — the dashboard's
+    # local storage can be wiped when the free hosting sleeps and reboots, so it's
+    # not a safe place for coordinators' real field data to live even briefly.
+    can_edit = user["role"] == "admin"
 
     st.title(p["name"])
     st.caption(f"{p['funder']} · {p['locations']}")
     st.markdown(f"> {p['objective']}")
 
-    st.subheader("Indicators")
-    all_inds = indicators_for(project_id)
+    tab_ind, tab_map, tab_photos = st.tabs(["Indicators", "Map", "Photos"])
 
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        search = st.text_input("Search indicators", placeholder="e.g. 'training' or 'women'", key=f"search_{project_id}")
-    with c2:
-        status_filter = st.multiselect("Filter by status", ["On track", "At risk", "Behind"],
-                                        default=["On track", "At risk", "Behind"], key=f"statusf_{project_id}")
+    with tab_ind:
+        all_inds = indicators_for(project_id)
 
-    inds = all_inds
-    if search:
-        inds = [i for i in inds if search.lower() in i["name"].lower()]
-    inds = [i for i in inds if status_of(pct_complete(i, df))[0] in status_filter]
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            search = st.text_input("Search indicators", placeholder="e.g. 'training' or 'women'", key=f"search_{project_id}")
+        with c2:
+            status_filter = st.multiselect("Filter by status", ["On track", "At risk", "Behind"],
+                                            default=["On track", "At risk", "Behind"], key=f"statusf_{project_id}")
 
-    if not inds:
-        st.info("No indicators match your search/filter.")
-    else:
-        chart_rows = []
-        for ind in inds:
-            pct = max(0, min(100, pct_complete(ind, df)))
-            label, _ = status_of(pct_complete(ind, df))
-            short_name = ind["name"] if len(ind["name"]) <= 28 else ind["name"][:25] + "..."
-            chart_rows.append({"Indicator": short_name, "Full name": ind["name"], "% complete": round(pct, 1), "Status": label})
-        chart_df = pd.DataFrame(chart_rows)
-        ind_chart = (
-            alt.Chart(chart_df)
-            .mark_bar()
-            .encode(
-                x=alt.X("Indicator:N", title=None, sort=chart_df["Indicator"].tolist(),
-                         axis=alt.Axis(labelAngle=-45, labelLimit=160)),
-                y=alt.Y("% complete:Q", scale=alt.Scale(domain=[0, 100])),
-                color=alt.Color(
-                    "Status:N",
-                    scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
-                    legend=alt.Legend(title=None, orient="top"),
-                ),
-                tooltip=["Full name", "% complete", "Status"],
+        inds = all_inds
+        if search:
+            inds = [i for i in inds if search.lower() in i["name"].lower()]
+        inds = [i for i in inds if status_of(pct_complete(i, df))[0] in status_filter]
+
+        if not inds:
+            st.info("No indicators match your search/filter.")
+        else:
+            chart_rows = []
+            for ind in inds:
+                pct = max(0, min(100, pct_complete(ind, df)))
+                label, _ = status_of(pct_complete(ind, df))
+                short_name = ind["name"] if len(ind["name"]) <= 28 else ind["name"][:25] + "..."
+                chart_rows.append({"Indicator": short_name, "Full name": ind["name"], "% complete": round(pct, 1), "Status": label})
+            chart_df = pd.DataFrame(chart_rows)
+            ind_chart = (
+                alt.Chart(chart_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Indicator:N", title=None, sort=chart_df["Indicator"].tolist(),
+                             axis=alt.Axis(labelAngle=-45, labelLimit=160)),
+                    y=alt.Y("% complete:Q", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color(
+                        "Status:N",
+                        scale=alt.Scale(domain=["On track", "At risk", "Behind"], range=[STATUS_GOOD, STATUS_WARN, STATUS_BAD]),
+                        legend=alt.Legend(title=None, orient="top"),
+                    ),
+                    tooltip=["Full name", "% complete", "Status"],
+                )
+                .properties(height=380)
             )
-            .properties(height=380)
-        )
-        st.altair_chart(ind_chart, use_container_width=True)
+            st.altair_chart(ind_chart, use_container_width=True)
 
-        for ind in inds:
-            render_indicator_row(ind, df, can_edit)
+            for ind in inds:
+                render_indicator_row(ind, df, can_edit)
 
-    if st.session_state.get("logging_indicator"):
-        ind = next((i for i in all_inds if i["id"] == st.session_state["logging_indicator"]), None)
-        if ind:
-            render_log_form(ind, project_id, user)
+        if st.session_state.get("logging_indicator"):
+            ind = next((i for i in all_inds if i["id"] == st.session_state["logging_indicator"]), None)
+            if ind:
+                render_log_form(ind, project_id, user)
+
+    with tab_map:
+        render_map_tab(df, project_id)
+
+    with tab_photos:
+        render_photos_tab(df, project_id)
+
+
+# ---------------------------------------------------------------
+# COMMUNITY VIEW
+# ---------------------------------------------------------------
+def all_communities_for(projects):
+    seen = []
+    for p in projects:
+        for c in communities_for(p["id"]):
+            if c not in seen:
+                seen.append(c)
+    return seen
+
+
+def render_community_view(user, df):
+    st.title("Community View")
+    st.caption("See everything happening in one community, across every project active there.")
+    vp = visible_projects(user)
+    communities = all_communities_for(vp)
+    if not communities:
+        st.info("No communities configured yet.")
+        return
+
+    selected = st.selectbox("Community", communities)
+    active_projects = [p for p in vp if selected in communities_for(p["id"])]
+    st.caption(f"**{selected}** has activity from {len(active_projects)} project(s): " + ", ".join(p["short_name"] for p in active_projects))
+
+    for p in active_projects:
+        st.markdown("---")
+        st.subheader(p["short_name"])
+        local_df = df[df["community"] == selected]
+        inds_with_data = [i for i in indicators_for(p["id"]) if not local_df[local_df["indicator"] == i["id"]].empty]
+
+        if not inds_with_data:
+            st.info(f"No entries logged in {selected} yet for this project.")
+            continue
+
+        for ind in inds_with_data:
+            cur = current_value(local_df, ind)
+            pct = pct_complete(ind, local_df)
+            label, color = status_of(pct)
+            unit = "%" if ind["type"] in ("percent", "average") else ind["unit"]
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.markdown(f"{ind['name']} — **{cur:g}{'%' if ind['type'] in ('percent','average') else ''}** of {ind['target']:g} {unit if ind['type']=='count' else ''}")
+            with c2:
+                st.markdown(f"<span style='background:{color}22;color:{color};padding:2px 8px;border-radius:10px;font-size:12px;'>{label}</span>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.subheader(f"Recent notes from {selected}")
+    active_ids = {i["id"] for p in active_projects for i in indicators_for(p["id"])}
+    notes = df[(df["community"] == selected) & df["indicator"].isin(active_ids)
+               & df["note"].notna() & (df["note"].astype(str).str.strip() != "")]
+    if notes.empty:
+        st.info("No notes recorded yet for this community.")
+    else:
+        notes = notes.copy()
+        notes["obs_date"] = pd.to_datetime(notes["obs_date"], errors="coerce")
+        notes = notes.sort_values("obs_date", ascending=False).head(10)
+        for _, row in notes.iterrows():
+            ind = next((i for i in INDICATORS if i["id"] == row["indicator"]), None)
+            date_str = row["obs_date"].strftime("%d %b %Y") if pd.notnull(row["obs_date"]) else ""
+            st.markdown(f"**{date_str}** — *{ind['name'] if ind else row['indicator']}*: {row['note']}")
 
 
 # ---------------------------------------------------------------
 # REPORTS
 # ---------------------------------------------------------------
+def _pdf_safe(text):
+    """The built-in PDF font only supports latin-1 characters. Coordinator
+    notes, project names, etc. can contain characters outside that (smart
+    quotes, em dashes, ...) which would otherwise crash report generation.
+    This swaps common cases for plain ASCII and safely drops anything else
+    left over, so a report can never fail to generate because of this."""
+    if text is None:
+        return ""
+    text = str(text)
+    for bad, good in {
+        "\u2014": "-", "\u2013": "-",
+        "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"',
+        "\u2026": "...", "\u00b7": "-",
+    }.items():
+        text = text.replace(bad, good)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def generate_pdf_report(p, inds, df):
+    """Builds a donor-ready PDF: header, objective, summary, full indicator
+    table with status, and recent field notes. Returns raw PDF bytes."""
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Youth Action Lead Liberia", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Monitoring, Evaluation, Accountability & Learning", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.multi_cell(0, 7, _pdf_safe(p["name"]), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5, _pdf_safe(f"Funder: {p['funder']}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 5, _pdf_safe(f"Location: {p['locations']}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 5, f"Generated: {datetime.date.today().strftime('%d %b %Y')}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "Objective", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.multi_cell(0, 5, _pdf_safe(p["objective"]), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    s = project_summary(p["id"], df)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "Summary", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5, _pdf_safe(f"Overall average progress: {s['avg']}% across {s['total']} indicators - "
+                                    f"{s['good']} on track, {s['warn']} at risk, {s['bad']} behind."),
+                   new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    status_colors = {"On track": (223, 234, 217), "At risk": (243, 230, 204), "Behind": (241, 218, 216)}
+
+    pdf.set_font("Helvetica", "B", 8)
+    with pdf.table(col_widths=(84, 18, 18, 18, 14, 24), text_align=("LEFT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "LEFT")) as table:
+        header = table.row()
+        for h in ["Indicator", "Baseline", "Current", "Target", "%", "Status"]:
+            header.cell(h)
+        pdf.set_font("Helvetica", "", 7)
+        for ind in inds:
+            cur = current_value(df, ind)
+            pct = pct_complete(ind, df)
+            label, _ = status_of(pct)
+            row = table.row()
+            row.cell(_pdf_safe(ind["name"])[:58])
+            row.cell(f"{ind['baseline']:g}")
+            row.cell(f"{cur:.1f}")
+            row.cell(f"{ind['target']:g}")
+            row.cell(f"{round(pct)}")
+            r, g, b = status_colors.get(label, (255, 255, 255))
+            row.cell(label, style=FontFace(fill_color=(r, g, b)))
+
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "Recent field notes", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8)
+    proj_ids = {i["id"] for i in inds}
+    notes = df[df["indicator"].isin(proj_ids) & df["note"].notna() & (df["note"].astype(str).str.strip() != "")]
+    if notes.empty:
+        pdf.multi_cell(0, 5, "No narrative updates recorded yet.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        notes = notes.copy()
+        notes["obs_date"] = pd.to_datetime(notes["obs_date"], errors="coerce")
+        notes = notes.sort_values("obs_date", ascending=False).head(10)
+        for _, row in notes.iterrows():
+            ind = next((i for i in inds if i["id"] == row["indicator"]), None)
+            date_str = row["obs_date"].strftime("%d %b %Y") if pd.notnull(row["obs_date"]) else ""
+            ind_name = ind["name"] if ind else row["indicator"]
+            pdf.multi_cell(0, 5, _pdf_safe(f"{date_str} - {ind_name}: {row['note']}"), new_x="LMARGIN", new_y="NEXT")
+
+    return bytes(pdf.output())
+
+
 def render_reports(user, df):
     st.title("Reports")
     vp = visible_projects(user)
@@ -534,7 +819,14 @@ def render_reports(user, df):
     st.dataframe(report_df, use_container_width=True, hide_index=True)
 
     csv_bytes = report_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download table as CSV", csv_bytes, file_name=f"{selected}_report.csv", mime="text/csv")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button("Download table as CSV", csv_bytes, file_name=f"{selected}_report.csv", mime="text/csv")
+    with dl2:
+        if st.button("Generate PDF report"):
+            with st.spinner("Building PDF..."):
+                pdf_bytes = generate_pdf_report(p, inds, df)
+            st.download_button("Download PDF report", pdf_bytes, file_name=f"{selected}_report.pdf", mime="application/pdf")
 
     st.subheader("Recent field updates")
     proj_ids = {i["id"] for i in inds}
@@ -641,7 +933,7 @@ def main():
         st.markdown("---")
 
         vp = visible_projects(user)
-        nav_options = ["Dashboard"] + [p["short_name"] for p in vp] + ["Reports"]
+        nav_options = ["Dashboard"] + [p["short_name"] for p in vp] + ["Community View", "Reports"]
         if user["role"] == "admin":
             nav_options.append("Manage")
         nav_options.append("Settings")
@@ -654,6 +946,8 @@ def main():
 
     if choice == "Dashboard":
         render_dashboard(user, df)
+    elif choice == "Community View":
+        render_community_view(user, df)
     elif choice == "Reports":
         render_reports(user, df)
     elif choice == "Manage":
