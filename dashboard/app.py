@@ -791,6 +791,91 @@ def generate_pdf_report(p, inds, df):
     return bytes(pdf.output())
 
 
+def generate_docx_report(p, inds, df):
+    """Builds the same donor-ready report as the PDF, as an editable Word
+    document instead — header, objective, summary, indicator table with
+    status shading, and recent field notes. Returns raw .docx bytes."""
+    import io
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    doc = Document()
+
+    doc.add_heading("Youth Action Lead Liberia", level=1)
+    sub = doc.add_paragraph("Monitoring, Evaluation, Accountability & Learning")
+    sub.runs[0].italic = True
+
+    doc.add_heading(p["name"], level=2)
+    doc.add_paragraph(f"Funder: {p['funder']}")
+    doc.add_paragraph(f"Location: {p['locations']}")
+    doc.add_paragraph(f"Generated: {datetime.date.today().strftime('%d %b %Y')}")
+
+    doc.add_heading("Objective", level=3)
+    obj = doc.add_paragraph(p["objective"])
+    obj.runs[0].italic = True
+
+    s = project_summary(p["id"], df)
+    doc.add_heading("Summary", level=3)
+    doc.add_paragraph(
+        f"Overall average progress: {s['avg']}% across {s['total']} indicators — "
+        f"{s['good']} on track, {s['warn']} at risk, {s['bad']} behind."
+    )
+
+    doc.add_heading("Indicators", level=3)
+    table = doc.add_table(rows=1, cols=6)
+    table.style = "Light Grid Accent 1"
+    hdr = table.rows[0].cells
+    for i, h in enumerate(["Indicator", "Baseline", "Current", "Target", "%", "Status"]):
+        hdr[i].text = h
+        for p_ in hdr[i].paragraphs:
+            for r in p_.runs:
+                r.bold = True
+
+    status_fills = {"On track": "DFEAD9", "At risk": "F3E6CC", "Behind": "F1DAD8"}
+
+    def _shade(cell, hex_color):
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:fill"), hex_color)
+        tc_pr.append(shd)
+
+    for ind in inds:
+        cur = current_value(df, ind)
+        pct = pct_complete(ind, df)
+        label, _ = status_of(pct)
+        row = table.add_row().cells
+        row[0].text = ind["name"]
+        row[1].text = f"{ind['baseline']:g}"
+        row[2].text = f"{cur:.1f}"
+        row[3].text = f"{ind['target']:g}"
+        row[4].text = f"{round(pct)}"
+        row[5].text = label
+        _shade(row[5], status_fills.get(label, "FFFFFF"))
+
+    doc.add_heading("Recent field notes", level=3)
+    proj_ids = {i["id"] for i in inds}
+    notes = df[df["indicator"].isin(proj_ids) & df["note"].notna() & (df["note"].astype(str).str.strip() != "")]
+    if notes.empty:
+        doc.add_paragraph("No narrative updates recorded yet.")
+    else:
+        notes = notes.copy()
+        notes["obs_date"] = pd.to_datetime(notes["obs_date"], errors="coerce")
+        notes = notes.sort_values("obs_date", ascending=False).head(10)
+        for _, row in notes.iterrows():
+            ind = next((i for i in inds if i["id"] == row["indicator"]), None)
+            date_str = row["obs_date"].strftime("%d %b %Y") if pd.notnull(row["obs_date"]) else ""
+            ind_name = ind["name"] if ind else row["indicator"]
+            para = doc.add_paragraph()
+            run = para.add_run(f"{date_str} — {ind_name}: ")
+            run.bold = True
+            para.add_run(str(row["note"]))
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def render_reports(user, df):
     st.title("Reports")
     vp = visible_projects(user)
@@ -819,7 +904,7 @@ def render_reports(user, df):
     st.dataframe(report_df, use_container_width=True, hide_index=True)
 
     csv_bytes = report_df.to_csv(index=False).encode("utf-8")
-    dl1, dl2 = st.columns(2)
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
         st.download_button("Download table as CSV", csv_bytes, file_name=f"{selected}_report.csv", mime="text/csv")
     with dl2:
@@ -827,6 +912,14 @@ def render_reports(user, df):
             with st.spinner("Building PDF..."):
                 pdf_bytes = generate_pdf_report(p, inds, df)
             st.download_button("Download PDF report", pdf_bytes, file_name=f"{selected}_report.pdf", mime="application/pdf")
+    with dl3:
+        if st.button("Generate Word report"):
+            with st.spinner("Building Word document..."):
+                docx_bytes = generate_docx_report(p, inds, df)
+            st.download_button(
+                "Download Word report", docx_bytes, file_name=f"{selected}_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
 
     st.subheader("Recent field updates")
     proj_ids = {i["id"] for i in inds}
