@@ -51,6 +51,8 @@ def build():
     survey.append(["integer", "assessed", "How many were assessed?", "yes", IS_PERCENT, "", "", "", ""])
     survey.append(["integer", "improved", "How many showed the improvement (or met the target behavior)?", "yes", IS_PERCENT, "", "", ".<=${assessed}", "Cannot be more than the number assessed"])
     survey.append(["date", "obs_date", "Date of observation", "yes", "", "", "today()", "", ""])
+    survey.append(["geopoint", "location", "GPS location (optional — tap to capture on site)", "no", "", "", "", "", ""])
+    survey.append(["image", "photo", "Photo evidence (optional)", "no", "", "", "", "", ""])
     survey.append(["text", "note", "Notes / context (optional)", "no", "", "", "", "", ""])
     survey.append(["select_one coordinator", "coordinator", "Recorded by", "yes", "", "", "", "", ""])
 
