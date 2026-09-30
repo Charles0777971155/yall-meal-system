@@ -1,10 +1,22 @@
 users:
-  charles:
+  charles@meal@yall:
     name: Charles Karbedeh Jr.
     title: MEAL Officer & Climate Justice Hub Coordinator
     role: admin
     project: all
-    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
+    pin_hash: a0044e5f44c43e083580734c22ef8d01e167315bad2aa6fdd5ad2a6f2c3491da
+  edwin@ed@yall:
+    name: Edwin Boakai
+    title: Executive Director
+    role: viewer
+    project: all
+    pin_hash: 88b133fcdeac60282d63e96f761203913fd965d5288d41b5498ff48e3e559134
+  jerry@program@yall:
+    name: Jerry Kollie
+    title: Program Manager
+    role: viewer
+    project: all
+    pin_hash: e1d59eb5265c5a16af60e9eb3f2eb9ffa58afc1f4edcb091361ee868330fca1b
   women_coord:
     name: Women's Rights Coordinator
     title: Project Coordinator
@@ -28,10 +40,4 @@ users:
     title: Project Coordinator
     role: coordinator
     project: women_agri
-    pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
-  ed_viewer:
-    name: Edwin Boakai
-    title: Executive Director
-    role: viewer
-    project: all
     pin_hash: 03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4
