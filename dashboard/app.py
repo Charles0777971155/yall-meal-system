@@ -252,11 +252,9 @@ def needs_attention(df, project_ids=None):
 def render_login():
     st.markdown("## YALL M&E System")
     st.caption("Youth Action Lead Liberia — Monitoring, Evaluation, Accountability & Learning")
-    users = auth.load_users()
-    options = {uid: f"{u['name']} — {u['title']}" for uid, u in users.items()}
 
     with st.form("login_form"):
-        username = st.selectbox("Your account", options=list(options.keys()), format_func=lambda u: options[u])
+        username = st.text_input("Username")
         pin = st.text_input("PIN", type="password")
         submitted = st.form_submit_button("Sign in")
 
@@ -266,10 +264,7 @@ def render_login():
             st.session_state["user"] = user
             st.rerun()
         else:
-            st.error("Incorrect PIN. Please try again.")
-
-    st.caption("Default PIN is 1234 for every account until changed in Settings.")
-
+            st.error("Incorrect username or PIN. Please try again.")
 
 # ---------------------------------------------------------------
 # DASHBOARD HOME
