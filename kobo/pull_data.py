@@ -29,8 +29,8 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 OUT_CSV = os.path.join(DATA_DIR, "submissions.csv")
 
 FIELDS = ["project", "indicator", "value", "assessed", "improved",
-          "community", "group", "obs_date", "lat", "lon", "photo_url",
-          "note", "coordinator", "_submission_time"]
+          "community", "group", "obs_date", "male", "female",
+          "lat", "lon", "photo_url", "note", "coordinator", "_submission_time"]
 
 
 def fetch_submissions(server, form_uid, token):
@@ -68,7 +68,6 @@ def _find_photo_url(submission):
     for att in submission.get("_attachments", []):
         filename = att.get("filename", "")
         if filename.endswith(photo_field):
-            # Prefer the full-size download URL; fall back to whatever's present.
             return att.get("download_url") or att.get("download_large_url") or ""
     return ""
 
@@ -86,6 +85,8 @@ def to_rows(submissions):
             "community": s.get("community", ""),
             "group": s.get("group", ""),
             "obs_date": s.get("obs_date", ""),
+            "male": s.get("male", ""),
+            "female": s.get("female", ""),
             "lat": lat,
             "lon": lon,
             "photo_url": _find_photo_url(s),

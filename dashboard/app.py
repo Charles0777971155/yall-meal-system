@@ -11,6 +11,7 @@ Deploy free: push this repo to GitHub, then deploy on share.streamlit.io
 import os
 import sys
 import datetime
+import calendar
 
 import pandas as pd
 import altair as alt
@@ -27,7 +28,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 LIVE_CSV = os.path.join(DATA_DIR, "submissions.csv")
 SAMPLE_CSV = os.path.join(DATA_DIR, "submissions_sample.csv")
 FIELDS = ["project", "indicator", "value", "assessed", "improved", "community", "group",
-          "obs_date", "lat", "lon", "photo_url",
+          "obs_date", "male", "female", "lat", "lon", "photo_url",
           "note", "coordinator", "_submission_time"]
 
 STALE_DAYS = 60  # flag an indicator as "needs attention" if untouched this long
@@ -54,12 +55,14 @@ def load_submissions() -> pd.DataFrame:
 
 
 def append_manual_entry(project_id, indicator_id, obs_date, note, coordinator,
-                         value=None, assessed=None, improved=None, community=None, group=None):
+                         value=None, assessed=None, improved=None, community=None, group=None,
+                         male=None, female=None):
     df = load_submissions()
     new_row = {
         "project": project_id, "indicator": indicator_id,
         "value": value, "assessed": assessed, "improved": improved,
         "community": community, "group": group,
+        "male": male, "female": female,
         "obs_date": obs_date, "note": note, "coordinator": coordinator,
         "_submission_time": datetime.datetime.now().isoformat(timespec="seconds"),
     }
@@ -150,6 +153,35 @@ def average_group_changes(df, indicator_id):
             baseline_only += 1
     avg = sum(changes) / len(changes) if changes else 0.0
     return avg, len(changes), baseline_only
+
+
+def sum_gender(df, indicator_id):
+    """Total male and female counts logged for an indicator, summed across
+    every entry that included a gender breakdown. Entries that didn't
+    specify gender simply don't contribute — they aren't treated as zero."""
+    sub = df[df["indicator"] == indicator_id]
+    total_m, total_f = 0.0, 0.0
+    any_data = False
+    for _, row in sub.iterrows():
+        m = _to_float(row.get("male"))
+        f = _to_float(row.get("female"))
+        if m is not None:
+            total_m += m
+            any_data = True
+        if f is not None:
+            total_f += f
+            any_data = True
+    return (total_m, total_f) if any_data else (None, None)
+
+
+def collection_dates_for(df, indicator_id):
+    """Every distinct date an entry was logged for this indicator, in this
+    (already filtered) dataframe — used to show 'data collected on' in reports."""
+    sub = _entries_for(df, indicator_id)
+    if sub.empty:
+        return []
+    dates = sorted(d for d in sub["obs_date"].dropna().unique())
+    return [pd.Timestamp(d).strftime("%d %b %Y") for d in dates]
 
 
 def current_value(df: pd.DataFrame, indicator: dict):
@@ -482,8 +514,18 @@ def render_log_form(ind, project_id, user):
             value = st.number_input(f"New value ({ind['unit']})", step=1.0)
             assessed = improved = None
 
-        community = st.selectbox("Community", communities) if communities else None
+        community_options = (["(not tied to one community)"] + communities) if communities else []
+        community_choice = st.selectbox("Community", community_options) if community_options else None
+        community = None if community_choice == "(not tied to one community)" else community_choice
         group = st.text_input("Group / cohort (optional)", placeholder="e.g. Group A, if you're running more than one group in this community")
+
+        male = female = None
+        if ind.get("gender_disagg"):
+            st.caption("Optional — fill in if you have the breakdown. The value above stays the real total either way.")
+            gc1, gc2 = st.columns(2)
+            male = gc1.number_input("Of that, how many male?", min_value=0, step=1, value=0)
+            female = gc2.number_input("Of that, how many female?", min_value=0, step=1, value=0)
+
         obs_date = st.date_input("Date", value=datetime.date.today())
         note = st.text_area("Note (what happened, context, evidence)")
         c1, c2 = st.columns(2)
@@ -496,7 +538,8 @@ def render_log_form(ind, project_id, user):
             return
         append_manual_entry(project_id, ind["id"], obs_date.isoformat(), note, user["name"],
                              value=value, assessed=assessed, improved=improved,
-                             community=community, group=group)
+                             community=community, group=group,
+                             male=(male or None), female=(female or None))
         st.session_state["logging_indicator"] = None
         st.success("Update saved.")
         st.rerun()
@@ -871,6 +914,37 @@ def generate_docx_report(p, inds, df):
     return buf.getvalue()
 
 
+def get_period_range(choice, month=None, year=None, custom_start=None, custom_end=None):
+    """Returns (period_start, period_end) as datetime.date, or (None, None)
+    for 'All time' (no filtering)."""
+    if choice == "Specific month":
+        period_start = datetime.date(year, month, 1)
+        last_day = calendar.monthrange(year, month)[1]
+        period_end = datetime.date(year, month, last_day)
+        return period_start, period_end
+    if choice == "Custom range":
+        return custom_start, custom_end
+    return None, None
+
+
+def period_achievement(period_df, indicator):
+    """The raw achievement within a (possibly narrow) date-filtered slice of
+    data — NOT compared back to the indicator's overall baseline/target, just
+    'what happened in this window'. Returns None when nothing was logged in
+    the window, so it displays as blank rather than a misleading zero."""
+    ind_id = indicator["id"]
+    if indicator["type"] == "average":
+        avg, n, _ = average_group_changes(period_df, ind_id)
+        return avg if n else None
+    if indicator["type"] == "percent":
+        total_a, total_i = sum_percent_components(period_df, ind_id)
+        if total_a and total_a > 0:
+            return total_i / total_a * 100.0
+        return None
+    total = sum_values(period_df, ind_id)
+    return total
+
+
 def render_reports(user, df):
     st.title("Reports")
     vp = visible_projects(user)
@@ -884,19 +958,89 @@ def render_reports(user, df):
     st.caption(f"Funder: {p['funder']} | Location: {p['locations']} | Generated {datetime.date.today().strftime('%d %b %Y')}")
     st.markdown(f"> {p['objective']}")
 
+    st.subheader("Reporting period")
+    period_choice = st.radio("Period", ["All time", "Specific month", "Custom range"], horizontal=True, label_visibility="collapsed")
+    period_start = period_end = None
+    if period_choice == "Specific month":
+        c1, c2 = st.columns(2)
+        today = datetime.date.today()
+        month = c1.selectbox("Month", list(range(1, 13)), format_func=lambda m: calendar.month_name[m], index=today.month - 1)
+        year = c2.number_input("Year", min_value=2024, max_value=2035, value=today.year, step=1)
+        period_start, period_end = get_period_range("Specific month", month=month, year=year)
+    elif period_choice == "Custom range":
+        c1, c2 = st.columns(2)
+        period_start = c1.date_input("From", value=datetime.date.today().replace(day=1))
+        period_end = c2.date_input("To", value=datetime.date.today())
+
+    # Prepare two views of the data: cumulative-to-date (as of period end, or
+    # everything if "All time"), and period-only (just entries inside the
+    # chosen window). All existing aggregation logic is reused unchanged —
+    # only the dataframe fed into it differs, same trick as Community View.
+    df_dated = df.copy()
+    df_dated["obs_date"] = pd.to_datetime(df_dated["obs_date"], errors="coerce")
+    if period_end is not None:
+        cumulative_df = df_dated[df_dated["obs_date"] <= pd.Timestamp(period_end)]
+    else:
+        cumulative_df = df_dated
+    if period_start is not None and period_end is not None:
+        period_df = df_dated[(df_dated["obs_date"] >= pd.Timestamp(period_start)) & (df_dated["obs_date"] <= pd.Timestamp(period_end))]
+    else:
+        period_df = df_dated
+
+    if period_choice == "All time":
+        st.caption("Showing all-time cumulative progress.")
+    else:
+        st.caption(f"Period: {period_start.strftime('%d %b %Y')} to {period_end.strftime('%d %b %Y')}. "
+                   "\"Cumulative\" = progress as of the end of this period. \"This period\" = only activity logged within it.")
+
     rows = []
     for ind in inds:
-        cur = current_value(df, ind)
-        pct = pct_complete(ind, df)
+        cum = current_value(cumulative_df, ind)
+        pct = pct_complete(ind, cumulative_df)
         label, _ = status_of(pct)
+        this_period = period_achievement(period_df, ind)
         unit = "%" if ind["type"] in ("percent", "average") else ind["unit"]
+        variance = round(ind["target"] - cum, 1)
+        dates = collection_dates_for(period_df, ind["id"])
+        dates_str = ", ".join(dates[:3]) + (f" (+{len(dates)-3} more)" if len(dates) > 3 else "") if dates else "—"
+
+        # These columns mix numbers with text ("N/A", "not disaggregated") across
+        # different rows, which breaks Streamlit's table display if left as raw
+        # numbers on some rows and strings on others — so everything here is
+        # formatted as a plain string up front, consistently.
+        if ind.get("gender_disagg"):
+            m, f = sum_gender(cumulative_df, ind["id"])
+            target_beneficiaries = f"{ind['target']:g}"
+            actual_reached = f"{cum:.1f}"
+            male_val = f"{m:.0f}" if m is not None else "not disaggregated"
+            female_val = f"{f:.0f}" if f is not None else "not disaggregated"
+        else:
+            target_beneficiaries = "N/A"
+            actual_reached = "N/A"
+            male_val = "N/A"
+            female_val = "N/A"
+        this_period_str = f"{this_period:.1f}" if this_period is not None else "no data this period"
+
         rows.append({
-            "Indicator": ind["name"], "Type": ind["type"],
-            "Baseline": ind["baseline"], "Current": round(cur, 1), "Target": ind["target"],
-            "Unit": unit, "%": round(pct), "Status": label,
+            "Indicator": ind["name"],
+            "Baseline": ind["baseline"],
+            "Target (life of project)": ind["target"],
+            "Cumulative Achievement": round(cum, 1),
+            "This Period Achievement": this_period_str,
+            "% of Target": round(pct),
+            "Status": label,
+            "Source of Data": ind.get("mov", ""),
+            "Collection Dates (this period)": dates_str,
+            "Variance": variance,
+            "Target Beneficiaries": target_beneficiaries,
+            "Actual Reached": actual_reached,
+            "Male": male_val,
+            "Female": female_val,
         })
     report_df = pd.DataFrame(rows)
     st.dataframe(report_df, use_container_width=True, hide_index=True)
+    st.caption("\"Variance\" is life-of-project target minus cumulative achievement — positive means still short of target, negative means it's been exceeded. "
+               "The written explanation for any variance is yours to add — this table gives you the numbers and dates to write it from.")
 
     csv_bytes = report_df.to_csv(index=False).encode("utf-8")
     dl1, dl2, dl3 = st.columns(3)
@@ -905,25 +1049,25 @@ def render_reports(user, df):
     with dl2:
         if st.button("Generate PDF report"):
             with st.spinner("Building PDF..."):
-                pdf_bytes = generate_pdf_report(p, inds, df)
+                pdf_bytes = generate_pdf_report(p, inds, cumulative_df)
             st.download_button("Download PDF report", pdf_bytes, file_name=f"{selected}_report.pdf", mime="application/pdf")
     with dl3:
         if st.button("Generate Word report"):
             with st.spinner("Building Word document..."):
-                docx_bytes = generate_docx_report(p, inds, df)
+                docx_bytes = generate_docx_report(p, inds, cumulative_df)
             st.download_button(
                 "Download Word report", docx_bytes, file_name=f"{selected}_report.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
+    st.caption("The PDF and Word reports show the compact summary view (cumulative progress as of this period). The CSV above has the full donor-style table with every column.")
 
     st.subheader("Recent field updates")
     proj_ids = {i["id"] for i in inds}
-    notes = df[df["indicator"].isin(proj_ids) & df["note"].notna() & (df["note"].astype(str).str.strip() != "")]
+    notes = period_df[period_df["indicator"].isin(proj_ids) & period_df["note"].notna() & (period_df["note"].astype(str).str.strip() != "")]
     if notes.empty:
-        st.info("No narrative updates recorded yet for this project.")
+        st.info("No narrative updates recorded yet for this project in this period.")
     else:
         notes = notes.copy()
-        notes["obs_date"] = pd.to_datetime(notes["obs_date"], errors="coerce")
         notes = notes.sort_values("obs_date", ascending=False).head(8)
         for _, row in notes.iterrows():
             ind = next((i for i in inds if i["id"] == row["indicator"]), None)
